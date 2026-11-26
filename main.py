@@ -1,39 +1,36 @@
 #!/usr/bin/env python3
-"""Entrypoint for make.fun news-image-20261125 (Wednesday 25 November 2026).
-
-Copies the pre-rendered deterministic 1024x1024 PNG front page (`entry.png`
-located alongside this script) into the directory specified by
-`MAKEFUN_OUTPUT_DIR` (default `/output`), creating parent directories if needed.
-Uses only the Python standard library (Python 3.13 compatible).
-"""
+"""Standard-library entrypoint that exports entry.png into MAKEFUN_OUTPUT_DIR."""
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
 import sys
+from pathlib import Path
+
+DEFAULT_OUTPUT_DIR = "/output"
+ENTRY_FILENAME = "entry.png"
 
 
 def export_entry() -> Path:
-    """Copy the rendered `entry.png` to the configured make.fun output path."""
-    src = Path(__file__).resolve().parent / "entry.png"
-    if not src.is_file():
-        raise FileNotFoundError(f"Rendered front page not found: {src}")
+    source = Path(__file__).resolve().parent / ENTRY_FILENAME
+    if not source.is_file():
+        raise FileNotFoundError(f"Expected rendered image at {source}")
 
-    output_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    dest = Path(output_dir) / "entry.png"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(src, dest)
-    return dest
+    output_root = Path(os.environ.get("MAKEFUN_OUTPUT_DIR") or DEFAULT_OUTPUT_DIR)
+    output_root.mkdir(parents=True, exist_ok=True)
+    destination = output_root / ENTRY_FILENAME
+    shutil.copyfile(source, destination)
+    return destination
 
 
 def main() -> int:
     try:
-        export_entry()
+        written = export_entry()
     except OSError as exc:
-        print(f"Error copying entry image: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 1
+    print(f"Exported {written} ({written.stat().st_size} bytes)")
     return 0
 
 

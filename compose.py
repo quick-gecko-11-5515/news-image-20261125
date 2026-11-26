@@ -1,587 +1,491 @@
 #!/usr/bin/env python3
-"""Deterministic front-page composer for The World Today — Wednesday 25 November 2026.
-
-Builds a 1024x1024 editorial broadsheet front page (`entry.png`) combining
-generated editorial photography with Noto Sans typography, smooth vertical
-gradient scrims, automated overlap/clipping validation, and deterministic
-PNG output under 1 MiB.
-"""
+"""Render 'The World Today' (25 November 2026) 1024x1024 front-page graphic."""
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from PIL import Image, ImageDraw, ImageFont
 
-BASE_DIR = Path(__file__).resolve().parent
-ASSETS_DIR = BASE_DIR / "assets"
-OUTPUT_PATH = BASE_DIR / "entry.png"
-
-CANVAS_DIM = 1024
+CANVAS_SIZE = (1024, 1024)
 MAX_BYTES = 1_048_576
 
-NOTO_DIR = Path("/usr/share/fonts/truetype/noto")
-FONT_FILES = {
-    "black": NOTO_DIR / "NotoSans-Black.ttf",
-    "extrabold": NOTO_DIR / "NotoSans-ExtraBold.ttf",
-    "bold": NOTO_DIR / "NotoSans-Bold.ttf",
-    "semibold": NOTO_DIR / "NotoSans-SemiBold.ttf",
-    "medium": NOTO_DIR / "NotoSans-Medium.ttf",
-    "regular": NOTO_DIR / "NotoSans-Regular.ttf",
-    "cond_extrabold": NOTO_DIR / "NotoSans-CondensedExtraBold.ttf",
-    "cond_bold": NOTO_DIR / "NotoSans-CondensedBold.ttf",
-}
+FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
+FONT_BOLD = FONT_DIR / "DejaVuSans-Bold.ttf"
+FONT_REGULAR = FONT_DIR / "DejaVuSans.ttf"
 
-COLORS = {
-    "bg": (11, 15, 22),
-    "card": (18, 24, 34),
-    "border": (42, 52, 68),
-    "gold": (224, 184, 64),
-    "masthead": (246, 248, 252),
-    "white": (255, 255, 255),
-    "date": (234, 240, 248),
-    "body": (222, 230, 240),
-    "brief": (242, 246, 252),
-    "rule": (74, 86, 104),
-    "footer": (176, 188, 204),
-    "scrim": (7, 10, 16),
-}
 
-# Verified 25 November 2026 world news content
-DATE_LINE = "WEDNESDAY 25 NOVEMBER 2026"
-
-HERO_ASSET = "hero-space.jpg"
-HERO_KICKER = "SPACE · TIANGONG"
-HERO_HEADLINE = "CHINA LAUNCHES SHENZHOU-24"
-HERO_SUBLINE = (
-    "China launched Shenzhou-24 to the Tiangong space station with three "
-    "astronauts, including the first Pakistani astronaut — the first foreign "
-    "astronaut in China's space programme."
-)
-
-LEFT_PANEL = {
-    "asset": "panel-chess.jpg",
-    "kicker": "GENEVA · WORLD CHESS CHAMPIONSHIP",
-    "headline": "GAME 2: 20-MOVE DRAW — MATCH TIED 1–1",
-    "text": (
-        "Champion Gukesh (White) and challenger Sindarov drew Game 2 in just "
-        "20 moves by threefold repetition; Gukesh surprised with the London "
-        "System (3.Bf4). Score 1–1; Game 3 is Thursday with Sindarov White."
-    ),
-    "focus_x": 0.50,
-    "focus_y": 0.96,
-    "zoom": 1.00,
-}
-
-RIGHT_PANEL = {
-    "asset": "panel-samara.jpg",
-    "kicker": "SAMARA · OIL WAR",
-    "headline": "UKRAINE STRIKES SAMARA REFINERIES",
-    "text": (
-        "Ukrainian drones hit two Rosneft refineries in the Samara region, "
-        "about 800 km from the border; fires reported, one person killed and "
-        "power cuts — a day after President Putin vowed retaliation for "
-        "refinery strikes."
-    ),
-    "focus_x": 0.50,
-    "focus_y": 0.54,
-    "zoom": 1.00,
-}
-
-BRIEFS = [
-    ("INDONESIA · DISASTER", "BOGOR GOLD MINE FLOOD: 9 DEAD, 17 STILL TRAPPED"),
-    ("KYIV · WAR FUNDING", "ZELENSKY: UKRAINE NEEDS €115BN FOREIGN AID FOR 2027"),
-]
-
-FOOTER_TEXT = "NORTH KOREA EXPELS SWISS DIPLOMATS, ORDERS EMBASSY SHUT IN 48 HOURS"
+@dataclass(frozen=True)
+class Palette:
+    page_bg: tuple[int, int, int] = (10, 15, 24)
+    card_bg: tuple[int, int, int] = (16, 23, 36)
+    card_border: tuple[int, int, int] = (38, 49, 68)
+    rule_subtle: tuple[int, int, int] = (46, 58, 78)
+    gold: tuple[int, int, int] = (218, 173, 62)
+    white: tuple[int, int, int] = (248, 250, 252)
+    body_text: tuple[int, int, int] = (218, 226, 237)
+    footer_text: tuple[int, int, int] = (176, 189, 208)
+    scrim_rgb: tuple[int, int, int] = (8, 12, 20)
+    shadow_rgb: tuple[int, int, int] = (4, 7, 12)
 
 
 @dataclass(frozen=True)
 class Box:
-    left: int
-    top: int
-    right: int
-    bottom: int
+    x: int
+    y: int
+    w: int
+    h: int
 
     @property
-    def width(self) -> int:
-        return self.right - self.left
+    def x2(self) -> int:
+        return self.x + self.w
 
     @property
-    def height(self) -> int:
-        return self.bottom - self.top
-
-    @property
-    def coords(self) -> tuple[int, int, int, int]:
-        return (self.left, self.top, self.right, self.bottom)
+    def y2(self) -> int:
+        return self.y + self.h
 
 
-class LayoutChecker:
-    """Renders text while validating bounds containment and zero overlaps."""
-
-    def __init__(self) -> None:
-        self.placed: list[tuple[str, tuple[int, int, int, int]]] = []
-        self.errors: list[str] = []
-
-    def draw_line(
-        self,
-        draw: ImageDraw.ImageDraw,
-        label: str,
-        x: int,
-        y: int,
-        text: str,
-        font: ImageFont.FreeTypeFont,
-        fill: tuple[int, int, int],
-        bounds: Box,
-        right_align: bool = False,
-    ) -> tuple[int, int, int, int]:
-        if right_align:
-            probe = draw.textbbox((0, y), text, font=font)
-            x = bounds.right - probe[2]
-        bbox = draw.textbbox((x, y), text, font=font)
-        if bbox[0] < bounds.left:
-            x += bounds.left - bbox[0]
-            bbox = draw.textbbox((x, y), text, font=font)
-
-        clips = []
-        if bbox[0] < bounds.left:
-            clips.append(f"left({bbox[0]}<{bounds.left})")
-        if bbox[1] < bounds.top:
-            clips.append(f"top({bbox[1]}<{bounds.top})")
-        if bbox[2] > bounds.right:
-            clips.append(f"right({bbox[2]}>{bounds.right})")
-        if bbox[3] > bounds.bottom:
-            clips.append(f"bottom({bbox[3]}>{bounds.bottom})")
-        if clips:
-            self.errors.append(f"CLIP {label}: {', '.join(clips)} bbox={bbox}")
-
-        for other_label, ob in self.placed:
-            if bbox[0] < ob[2] and bbox[2] > ob[0] and bbox[1] < ob[3] and bbox[3] > ob[1]:
-                self.errors.append(f"OVERLAP {label} with {other_label}: {bbox} vs {ob}")
-
-        self.placed.append((label, bbox))
-        draw.text((x, y), text, font=font, fill=fill)
-        return bbox
+@dataclass(frozen=True)
+class FeatureStory:
+    photo: str
+    focal_y: float
+    kicker: str
+    headline: str
+    body: str
 
 
-def get_font(style: str, size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(FONT_FILES[style]), size)
+@dataclass(frozen=True)
+class BriefStory:
+    kicker: str
+    lines: tuple[str, str]
 
 
-def crop_cover(
-    photo: Image.Image,
-    target_w: int,
-    target_h: int,
-    focus_x: float = 0.5,
-    focus_y: float = 0.5,
-    zoom: float = 1.0,
-) -> Image.Image:
-    src_w, src_h = photo.size
-    scale = max(target_w / src_w, target_h / src_h) * zoom
-    new_w = max(target_w, round(src_w * scale))
-    new_h = max(target_h, round(src_h * scale))
-    resized = photo.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    x0 = max(0, min(round((new_w - target_w) * focus_x), new_w - target_w))
-    y0 = max(0, min(round((new_h - target_h) * focus_y), new_h - target_h))
-    return resized.crop((x0, y0, x0 + target_w, y0 + target_h))
+COLORS = Palette()
+
+DATE_LINE = "WEDNESDAY 25 NOVEMBER 2026"
+MASTHEAD_TITLE = "THE WORLD TODAY"
+MASTHEAD_SUBTITLE = "THE DAY IN ONE PICTURE"
+
+HERO_PHOTO = "hero-space.jpg"
+HERO_KICKER = "SPACE · TIANGONG"
+HERO_HEADLINE = "CHINA LAUNCHES SHENZHOU-24"
+HERO_SUBLINE = (
+    "China launched Shenzhou-24 to the Tiangong space station with three astronauts, "
+    "including the first Pakistani astronaut — the first foreign astronaut in China's space programme."
+)
+
+PANELS: tuple[FeatureStory, FeatureStory] = (
+    FeatureStory(
+        photo="panel-chess.jpg",
+        focal_y=0.52,
+        kicker="GENEVA · WORLD CHESS CHAMPIONSHIP",
+        headline="GAME 2: 20-MOVE DRAW — MATCH TIED 1–1",
+        body=(
+            "Champion Gukesh (White) and challenger Sindarov drew Game 2 in just 20 moves "
+            "by threefold repetition; Gukesh surprised with the London System (3.Bf4). "
+            "Score 1–1; Game 3 is Thursday with Sindarov White."
+        ),
+    ),
+    FeatureStory(
+        photo="panel-samara.jpg",
+        focal_y=0.45,
+        kicker="SAMARA · OIL WAR",
+        headline="UKRAINE STRIKES SAMARA REFINERIES",
+        body=(
+            "Ukrainian drones hit two Rosneft refineries in the Samara region, about 800 km "
+            "from the border; fires reported, one person killed and power cuts — a day after "
+            "President Putin vowed retaliation for refinery strikes."
+        ),
+    ),
+)
+
+BRIEFS: tuple[BriefStory, BriefStory] = (
+    BriefStory(
+        kicker="INDONESIA · DISASTER",
+        lines=("BOGOR GOLD MINE FLOOD:", "9 DEAD, 17 STILL TRAPPED"),
+    ),
+    BriefStory(
+        kicker="KYIV · WAR FUNDING",
+        lines=("ZELENSKY: UKRAINE NEEDS", "€115BN FOREIGN AID FOR 2027"),
+    ),
+)
+
+FOOTER_TEXT = "NORTH KOREA EXPELS SWISS DIPLOMATS, ORDERS EMBASSY SHUT IN 48 HOURS"
 
 
-def make_vertical_scrim(
-    width: int,
-    height: int,
-    fade_start: float,
-    solid_start: float,
-    max_alpha: int,
-    rgb: tuple[int, int, int],
-) -> Image.Image:
-    col = Image.new("RGBA", (1, height), (rgb[0], rgb[1], rgb[2], 0))
-    y_fade = round(height * fade_start)
-    y_solid = round(height * solid_start)
-    span = max(1, y_solid - y_fade)
-    for y in range(height):
-        if y < y_fade:
-            alpha = 0
-        elif y < y_solid:
-            t = (y - y_fade) / span
-            smooth = t * t * (3.0 - 2.0 * t)
-            alpha = round(max_alpha * smooth)
-        else:
-            alpha = max_alpha
-        col.putpixel((0, y), (rgb[0], rgb[1], rgb[2], alpha))
-    return col.resize((width, height), Image.Resampling.NEAREST)
+def load_font(path: Path, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(str(path), size=size)
 
 
-def greedy_wrap(
+def fit_single_line_font(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font_path: Path,
+    max_width: int,
+    max_size: int,
+    min_size: int = 12,
+) -> ImageFont.FreeTypeFont:
+    for size in range(max_size, min_size - 1, -1):
+        font = load_font(font_path, size)
+        if draw.textlength(text, font=font) <= max_width:
+            return font
+    return load_font(font_path, min_size)
+
+
+def wrap_text(
     draw: ImageDraw.ImageDraw,
     text: str,
     font: ImageFont.FreeTypeFont,
     max_width: int,
 ) -> list[str]:
     words = text.split()
+    if not words:
+        return []
     lines: list[str] = []
-    buf: list[str] = []
-    for word in words:
-        candidate = " ".join(buf + [word])
-        if buf and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
-            lines.append(" ".join(buf))
-            buf = [word]
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if draw.textlength(candidate, font=font) <= max_width:
+            current = candidate
         else:
-            buf.append(word)
-    if buf:
-        lines.append(" ".join(buf))
+            lines.append(current)
+            current = word
+    lines.append(current)
     return lines
 
 
-def balanced_wrap(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    max_width: int,
-) -> list[str]:
-    base = greedy_wrap(draw, text, font, max_width)
-    line_count = len(base)
-    if line_count <= 1:
-        return base
+def load_cover_photo(
+    path: Path,
+    target_w: int,
+    target_h: int,
+    focal_y: float = 0.5,
+    jpeg_quality: int | None = None,
+) -> Image.Image:
+    with Image.open(path) as raw:
+        img = raw.convert("RGB")
+    src_w, src_h = img.size
+    scale = max(target_w / src_w, target_h / src_h)
+    resized_w = max(target_w, round(src_w * scale))
+    resized_h = max(target_h, round(src_h * scale))
+    img = img.resize((resized_w, resized_h), Image.Resampling.LANCZOS)
 
-    words = text.split()
-    n = len(words)
-    inf = 10**18
-    dp = [[inf] * (n + 1) for _ in range(line_count + 1)]
-    back = [[-1] * (n + 1) for _ in range(line_count + 1)]
-    dp[0][0] = 0
+    left = (resized_w - target_w) // 2
+    max_top = resized_h - target_h
+    top = max(0, min(max_top, round(max_top * focal_y)))
+    cropped = img.crop((left, top, left + target_w, top + target_h))
 
-    for k in range(1, line_count + 1):
-        for end in range(k, n + 1):
-            for start in range(k - 1, end):
-                if dp[k - 1][start] == inf:
-                    continue
-                width = draw.textbbox((0, 0), " ".join(words[start:end]), font=font)[2]
-                if width > max_width:
-                    continue
-                slack = max_width - width
-                orphan = 450_000 if (k == line_count and end - start == 1) else 0
-                cost = dp[k - 1][start] + slack * slack + orphan
-                if cost < dp[k][end]:
-                    dp[k][end] = cost
-                    back[k][end] = start
-
-    if dp[line_count][n] >= inf:
-        return base
-
-    out: list[str] = []
-    pos = n
-    for k in range(line_count, 0, -1):
-        prev = back[k][pos]
-        out.append(" ".join(words[prev:pos]))
-        pos = prev
-    out.reverse()
-    return out
+    if jpeg_quality is not None:
+        buf = io.BytesIO()
+        cropped.save(buf, format="JPEG", quality=jpeg_quality, subsampling=2)
+        buf.seek(0)
+        with Image.open(buf) as recompressed:
+            cropped = recompressed.convert("RGB")
+    return cropped
 
 
-def paste_photo_panel(
-    canvas: Image.Image,
-    asset_name: str,
-    box: Box,
-    focus_x: float,
-    focus_y: float,
-    zoom: float,
-    fade_start: float,
-    solid_start: float,
+def vertical_gradient(
+    width: int,
+    height: int,
+    rgb: tuple[int, int, int],
     max_alpha: int,
-) -> None:
-    photo = Image.open(ASSETS_DIR / asset_name).convert("RGBA")
-    fitted = crop_cover(photo, box.width, box.height, focus_x=focus_x, focus_y=focus_y, zoom=zoom)
-    scrim = make_vertical_scrim(
-        box.width,
-        box.height,
-        fade_start=fade_start,
-        solid_start=solid_start,
-        max_alpha=max_alpha,
-        rgb=COLORS["scrim"],
-    )
-    composited = Image.alpha_composite(fitted, scrim)
-    canvas.paste(composited, (box.left, box.top))
+    power: float = 1.5,
+) -> Image.Image:
+    strip = Image.new("RGBA", (1, height))
+    pixels = []
+    denom = max(1, height - 1)
+    for row in range(height):
+        t = (row / denom) ** power
+        alpha = min(255, max(0, round(max_alpha * t)))
+        pixels.append((*rgb, alpha))
+    strip.putdata(pixels)
+    return strip.resize((width, height), Image.Resampling.NEAREST)
 
 
-def draw_lines(
+def fit_shared_font(
     draw: ImageDraw.ImageDraw,
-    checker: LayoutChecker,
-    prefix: str,
-    x: int,
-    y_start: int,
-    step: int,
-    lines: Sequence[str],
-    font: ImageFont.FreeTypeFont,
-    fill: tuple[int, int, int],
-    bounds: Box,
-) -> int:
-    y = y_start
-    for idx, line in enumerate(lines, start=1):
-        checker.draw_line(draw, f"{prefix}.{idx}", x, y, line, font, fill, bounds)
-        y += step
-    return y
+    texts: Sequence[str],
+    font_path: Path,
+    max_width: int,
+    max_size: int,
+    min_size: int = 12,
+) -> ImageFont.FreeTypeFont:
+    for size in range(max_size, min_size - 1, -1):
+        font = load_font(font_path, size)
+        if all(draw.textlength(t, font=font) <= max_width for t in texts):
+            return font
+    return load_font(font_path, min_size)
 
 
-def render_front_page() -> list[str]:
-    canvas = Image.new("RGBA", (CANVAS_DIM, CANVAS_DIM), COLORS["bg"] + (255,))
-    checker = LayoutChecker()
+def draw_masthead(draw: ImageDraw.ImageDraw, margin_x: int, content_w: int) -> None:
+    title_font = load_font(FONT_BOLD, 46)
+    sub_font = load_font(FONT_BOLD, 15)
+    date_font = load_font(FONT_BOLD, 16)
 
-    margin = 32
-    gutter = 16
-    full_w = CANVAS_DIM - 2 * margin  # 960
-    col_w = (full_w - gutter) // 2  # 472
+    draw.text((margin_x, 16), MASTHEAD_TITLE, font=title_font, fill=COLORS.white)
 
-    hero_box = Box(margin, 122, margin + full_w, 532)  # 960x410
-    left_box = Box(margin, 546, margin + col_w, 846)  # 472x300
-    right_box = Box(margin + col_w + gutter, 546, margin + full_w, 846)  # 472x300
+    rule_y = 70
+    draw.rectangle((margin_x, rule_y, margin_x + content_w, rule_y + 2), fill=COLORS.gold)
 
-    paste_photo_panel(
-        canvas,
-        HERO_ASSET,
-        hero_box,
-        focus_x=0.50,
-        focus_y=0.28,
-        zoom=1.00,
-        fade_start=0.61,
-        solid_start=0.80,
-        max_alpha=240,
-    )
-    paste_photo_panel(
-        canvas,
-        LEFT_PANEL["asset"],
-        left_box,
-        focus_x=LEFT_PANEL["focus_x"],
-        focus_y=LEFT_PANEL["focus_y"],
-        zoom=LEFT_PANEL["zoom"],
-        fade_start=0.40,
-        solid_start=0.55,
-        max_alpha=248,
-    )
-    paste_photo_panel(
-        canvas,
-        RIGHT_PANEL["asset"],
-        right_box,
-        focus_x=RIGHT_PANEL["focus_x"],
-        focus_y=RIGHT_PANEL["focus_y"],
-        zoom=RIGHT_PANEL["zoom"],
-        fade_start=0.40,
-        solid_start=0.55,
-        max_alpha=248,
+    sub_y = 79
+    draw.text((margin_x, sub_y), MASTHEAD_SUBTITLE, font=sub_font, fill=COLORS.gold)
+
+    date_w = draw.textlength(DATE_LINE, font=date_font)
+    draw.text(
+        (margin_x + content_w - date_w, sub_y - 1),
+        DATE_LINE,
+        font=date_font,
+        fill=COLORS.white,
     )
 
+    draw.line(
+        ((margin_x, 105), (margin_x + content_w, 105)),
+        fill=COLORS.rule_subtle,
+        width=1,
+    )
+
+
+def draw_hero(
+    canvas: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    box: Box,
+    assets_dir: Path,
+    photo_quality: int | None,
+) -> None:
+    photo = load_cover_photo(
+        assets_dir / HERO_PHOTO,
+        box.w,
+        box.h,
+        focal_y=0.06,
+        jpeg_quality=photo_quality,
+    )
+    canvas.paste(photo, (box.x, box.y))
+
+    scrim_h = 250
+    scrim = vertical_gradient(box.w, scrim_h, COLORS.scrim_rgb, max_alpha=248, power=1.25)
+    canvas.paste(scrim, (box.x, box.y2 - scrim_h), scrim)
+
+    pad_x = 22
+    text_w = box.w - 2 * pad_x
+
+    kicker_font = load_font(FONT_BOLD, 14)
+    headline_font = fit_single_line_font(draw, HERO_HEADLINE, FONT_BOLD, text_w, 44, 28)
+    sub_font = load_font(FONT_REGULAR, 17)
+    sub_lines = wrap_text(draw, HERO_SUBLINE, sub_font, text_w)
+
+    sub_line_h = 23
+    sub_total_h = len(sub_lines) * sub_line_h
+    sub_top = box.y2 - 18 - sub_total_h
+    headline_top = sub_top - 56
+    kicker_top = headline_top - 22
+
+    # Subtle shadow for crisp legibility over the rocket exhaust plume
+    draw.text(
+        (box.x + pad_x + 1, kicker_top + 1),
+        HERO_KICKER,
+        font=kicker_font,
+        fill=COLORS.shadow_rgb,
+    )
+    draw.text((box.x + pad_x, kicker_top), HERO_KICKER, font=kicker_font, fill=COLORS.gold)
+
+    draw.text(
+        (box.x + pad_x + 2, headline_top + 2),
+        HERO_HEADLINE,
+        font=headline_font,
+        fill=COLORS.shadow_rgb,
+    )
+    draw.text((box.x + pad_x, headline_top), HERO_HEADLINE, font=headline_font, fill=COLORS.white)
+
+    for idx, line in enumerate(sub_lines):
+        draw.text(
+            (box.x + pad_x, sub_top + idx * sub_line_h),
+            line,
+            font=sub_font,
+            fill=COLORS.body_text,
+        )
+
+    draw.rectangle(
+        (box.x, box.y, box.x2 - 1, box.y2 - 1),
+        outline=COLORS.card_border,
+        width=1,
+    )
+
+
+def draw_feature_panel(
+    canvas: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    box: Box,
+    story: FeatureStory,
+    headline_font: ImageFont.FreeTypeFont,
+    assets_dir: Path,
+    photo_quality: int | None,
+) -> None:
+    draw.rectangle((box.x, box.y, box.x2 - 1, box.y2 - 1), fill=COLORS.card_bg)
+
+    photo_h = 160
+    photo = load_cover_photo(
+        assets_dir / story.photo,
+        box.w,
+        photo_h,
+        focal_y=story.focal_y,
+        jpeg_quality=photo_quality,
+    )
+    canvas.paste(photo, (box.x, box.y))
+
+    fade_h = 46
+    fade = vertical_gradient(box.w, fade_h, COLORS.card_bg, max_alpha=255, power=1.65)
+    canvas.paste(fade, (box.x, box.y + photo_h - fade_h), fade)
+
+    pad_x = 15
+    text_w = box.w - 2 * pad_x
+
+    kicker_font = load_font(FONT_BOLD, 12)
+    body_font = load_font(FONT_REGULAR, 14)
+
+    kicker_y = box.y + photo_h + 4
+    headline_y = kicker_y + 19
+    body_y = headline_y + 26
+
+    draw.text((box.x + pad_x, kicker_y), story.kicker, font=kicker_font, fill=COLORS.gold)
+    draw.text((box.x + pad_x, headline_y), story.headline, font=headline_font, fill=COLORS.white)
+
+    body_lines = wrap_text(draw, story.body, body_font, text_w)
+    line_h = 20
+    for idx, line in enumerate(body_lines):
+        draw.text(
+            (box.x + pad_x, body_y + idx * line_h),
+            line,
+            font=body_font,
+            fill=COLORS.body_text,
+        )
+
+    draw.rectangle(
+        (box.x, box.y, box.x2 - 1, box.y2 - 1),
+        outline=COLORS.card_border,
+        width=1,
+    )
+
+
+def draw_brief(
+    draw: ImageDraw.ImageDraw,
+    box: Box,
+    brief: BriefStory,
+    headline_font: ImageFont.FreeTypeFont,
+) -> None:
+    draw.rectangle((box.x, box.y, box.x2 - 1, box.y2 - 1), fill=COLORS.card_bg)
+    draw.rectangle((box.x, box.y, box.x2 - 1, box.y2 - 1), outline=COLORS.card_border, width=1)
+    draw.rectangle((box.x, box.y, box.x2 - 1, box.y + 3), fill=COLORS.gold)
+
+    pad_x = 15
+    kicker_font = load_font(FONT_BOLD, 12)
+
+    draw.text((box.x + pad_x, box.y + 17), brief.kicker, font=kicker_font, fill=COLORS.gold)
+
+    line_h = 24
+    start_y = box.y + 39
+    for idx, line in enumerate(brief.lines):
+        draw.text(
+            (box.x + pad_x, start_y + idx * line_h),
+            line,
+            font=headline_font,
+            fill=COLORS.white,
+        )
+
+
+def draw_footer(draw: ImageDraw.ImageDraw, margin_x: int, content_w: int) -> None:
+    draw.line(
+        ((margin_x, 976), (margin_x + content_w, 976)),
+        fill=COLORS.rule_subtle,
+        width=1,
+    )
+    footer_font = load_font(FONT_REGULAR, 13)
+    draw.text((margin_x, 987), FOOTER_TEXT, font=footer_font, fill=COLORS.footer_text)
+
+
+def render_page(assets_dir: Path, photo_quality: int | None = None) -> Image.Image:
+    canvas = Image.new("RGB", CANVAS_SIZE, COLORS.page_bg)
     draw = ImageDraw.Draw(canvas)
 
-    # Panel framing borders
-    for panel_box in (hero_box, left_box, right_box):
-        draw.rectangle(
-            [panel_box.left, panel_box.top, panel_box.right - 1, panel_box.bottom - 1],
-            outline=COLORS["border"],
-            width=1,
-        )
+    margin_x = 32
+    content_w = CANVAS_SIZE[0] - 2 * margin_x
+    gutter = 18
+    col_w = (content_w - gutter) // 2
 
-    # Masthead
-    masthead_box = Box(margin, 14, margin + full_w, 112)
-    checker.draw_line(
-        draw,
-        "masthead.title",
-        margin,
-        16,
-        "THE WORLD TODAY",
-        get_font("black", 52),
-        COLORS["masthead"],
-        masthead_box,
+    draw_masthead(draw, margin_x, content_w)
+
+    hero_box = Box(margin_x, 114, content_w, 410)
+    draw_hero(canvas, draw, hero_box, assets_dir, photo_quality)
+
+    panel_y = 538
+    panel_h = 304
+    panel_boxes: Sequence[Box] = (
+        Box(margin_x, panel_y, col_w, panel_h),
+        Box(margin_x + col_w + gutter, panel_y, col_w, panel_h),
     )
-    checker.draw_line(
+    panel_headline_font = fit_shared_font(
         draw,
-        "masthead.tagline",
-        margin,
-        82,
-        "THE DAY IN ONE PICTURE",
-        get_font("bold", 17),
-        COLORS["gold"],
-        masthead_box,
+        [story.headline for story in PANELS],
+        FONT_BOLD,
+        col_w - 30,
+        19,
+        14,
     )
-    checker.draw_line(
+    for box, story in zip(panel_boxes, PANELS):
+        draw_feature_panel(canvas, draw, box, story, panel_headline_font, assets_dir, photo_quality)
+
+    brief_y = 856
+    brief_h = 108
+    brief_boxes: Sequence[Box] = (
+        Box(margin_x, brief_y, col_w, brief_h),
+        Box(margin_x + col_w + gutter, brief_y, col_w, brief_h),
+    )
+    all_brief_lines = [line for brief in BRIEFS for line in brief.lines]
+    brief_headline_font = fit_shared_font(
         draw,
-        "masthead.date",
-        margin,
-        79,
-        DATE_LINE,
-        get_font("extrabold", 20),
-        COLORS["date"],
-        masthead_box,
-        right_align=True,
+        all_brief_lines,
+        FONT_BOLD,
+        col_w - 30,
+        18,
+        13,
     )
-    draw.rectangle([margin, 110, margin + full_w, 113], fill=COLORS["gold"])
+    for box, brief in zip(brief_boxes, BRIEFS):
+        draw_brief(draw, box, brief, brief_headline_font)
 
-    # Hero text overlay (positioned low to reveal the rocket exhaust plume above)
-    hero_text_box = Box(hero_box.left + 22, hero_box.top + 266, hero_box.right - 22, hero_box.bottom - 10)
-    hero_kicker_font = get_font("bold", 16)
-    hero_head_font = get_font("extrabold", 42)
-    # Subtle drop shadow behind kicker & headline for crisp readability over rocket glow
-    draw.text((hero_text_box.left + 1, hero_box.top + 273), HERO_KICKER, font=hero_kicker_font, fill=(6, 9, 14))
-    checker.draw_line(
-        draw,
-        "hero.kicker",
-        hero_text_box.left,
-        hero_box.top + 272,
-        HERO_KICKER,
-        hero_kicker_font,
-        COLORS["gold"],
-        hero_text_box,
+    draw_footer(draw, margin_x, content_w)
+    return canvas
+
+
+def encode_png(image: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    image.save(buf, format="PNG", optimize=True, compress_level=9)
+    return buf.getvalue()
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parent
+    assets_dir = root / "assets"
+    output_path = root / "entry.png"
+
+    quality_steps: Sequence[int | None] = (None, 88, 80, 72)
+    png_bytes = b""
+    chosen_quality: int | None = None
+
+    for quality in quality_steps:
+        page = render_page(assets_dir, photo_quality=quality)
+        candidate = encode_png(page)
+        png_bytes = candidate
+        chosen_quality = quality
+        if len(candidate) <= MAX_BYTES:
+            break
+
+    output_path.write_bytes(png_bytes)
+    print(
+        f"Wrote {output_path} ({len(png_bytes):,} bytes, "
+        f"size={CANVAS_SIZE[0]}x{CANVAS_SIZE[1]}, photo_quality={chosen_quality})"
     )
-    draw.text((hero_text_box.left + 2, hero_box.top + 297), HERO_HEADLINE, font=hero_head_font, fill=(6, 9, 14))
-    checker.draw_line(
-        draw,
-        "hero.headline",
-        hero_text_box.left,
-        hero_box.top + 295,
-        HERO_HEADLINE,
-        hero_head_font,
-        COLORS["white"],
-        hero_text_box,
-    )
-    hero_sub_font = get_font("regular", 18)
-    hero_sub_lines = balanced_wrap(draw, HERO_SUBLINE, hero_sub_font, hero_text_box.width)
-    draw_lines(
-        draw,
-        checker,
-        "hero.sub",
-        hero_text_box.left,
-        hero_box.top + 350,
-        24,
-        hero_sub_lines,
-        hero_sub_font,
-        COLORS["body"],
-        hero_text_box,
-    )
-
-    # Secondary side panels
-    panel_kicker_font = get_font("bold", 12)
-    panel_head_font = get_font("cond_extrabold", 22)
-    panel_body_font = get_font("regular", 14)
-
-    for tag, box, spec in (("left", left_box, LEFT_PANEL), ("right", right_box, RIGHT_PANEL)):
-        inner = Box(box.left + 16, box.top + 148, box.right - 16, box.bottom - 10)
-        draw.text((inner.left + 1, box.top + 155), spec["kicker"], font=panel_kicker_font, fill=(6, 9, 14))
-        checker.draw_line(
-            draw,
-            f"{tag}.kicker",
-            inner.left,
-            box.top + 154,
-            spec["kicker"],
-            panel_kicker_font,
-            COLORS["gold"],
-            inner,
-        )
-        head_lines = balanced_wrap(draw, spec["headline"], panel_head_font, inner.width)
-        next_y = draw_lines(
-            draw,
-            checker,
-            f"{tag}.headline",
-            inner.left,
-            box.top + 173,
-            26,
-            head_lines,
-            panel_head_font,
-            COLORS["white"],
-            inner,
-        )
-        body_lines = balanced_wrap(draw, spec["text"], panel_body_font, inner.width)
-        draw_lines(
-            draw,
-            checker,
-            f"{tag}.body",
-            inner.left,
-            next_y + 5,
-            20,
-            body_lines,
-            panel_body_font,
-            COLORS["body"],
-            inner,
-        )
-
-    # Briefs strip
-    brief_top = 860
-    brief_bottom = 958
-    brief_kicker_font = get_font("bold", 12)
-    brief_text_font = get_font("bold", 18)
-
-    for idx, (kicker, line_text) in enumerate(BRIEFS):
-        bx0 = margin + idx * (col_w + gutter)
-        bx1 = bx0 + col_w
-        card = Box(bx0, brief_top, bx1, brief_bottom)
-        draw.rectangle(card.coords, fill=COLORS["card"], outline=COLORS["border"], width=1)
-        draw.rectangle([bx0, brief_top, bx1, brief_top + 3], fill=COLORS["gold"])
-
-        inner = Box(bx0 + 16, brief_top + 10, bx1 - 16, brief_bottom - 10)
-        checker.draw_line(
-            draw,
-            f"brief{idx + 1}.kicker",
-            inner.left,
-            brief_top + 14,
-            kicker,
-            brief_kicker_font,
-            COLORS["gold"],
-            inner,
-        )
-        wrapped = balanced_wrap(draw, line_text, brief_text_font, inner.width)
-        draw_lines(
-            draw,
-            checker,
-            f"brief{idx + 1}.text",
-            inner.left,
-            brief_top + 36,
-            24,
-            wrapped,
-            brief_text_font,
-            COLORS["brief"],
-            inner,
-        )
-
-    # Footer strip
-    draw.rectangle([margin, 970, margin + full_w, 971], fill=COLORS["rule"])
-    footer_box = Box(margin, 974, margin + full_w, 1012)
-    checker.draw_line(
-        draw,
-        "footer.line",
-        margin,
-        983,
-        FOOTER_TEXT,
-        get_font("medium", 13),
-        COLORS["footer"],
-        footer_box,
-    )
-
-    # Deterministic PNG export under 1 MiB
-    rgb = canvas.convert("RGB")
-    rgb.save(OUTPUT_PATH, format="PNG", optimize=True)
-    byte_size = OUTPUT_PATH.stat().st_size
-    print(f"Rendered RGB PNG: {byte_size} bytes ({rgb.size[0]}x{rgb.size[1]})")
-    if byte_size > MAX_BYTES:
-        quantized = rgb.quantize(
-            colors=256,
-            method=Image.Quantize.MEDIANCUT,
-            dither=Image.Dither.FLOYDSTEINBERG,
-        )
-        quantized.save(OUTPUT_PATH, format="PNG", optimize=True)
-        byte_size = OUTPUT_PATH.stat().st_size
-        print(f"Quantized PNG: {byte_size} bytes")
-
-    return checker.errors
-
-
-def main() -> int:
-    errors = render_front_page()
-    if errors:
-        for err in errors:
-            print(f"LAYOUT ERROR: {err}")
-        return 1
-    print("Layout validation passed (0 issues).")
-    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

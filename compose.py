@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Front-page composer for The World Today — Wednesday 25 November 2026.
+"""Deterministic front-page composer for The World Today — Wednesday 25 November 2026.
 
-Builds a deterministic 1024x1024 PNG front page (`entry.png`) from editorial
-photography in `assets/` using Pillow, with balanced text wrapping, vertical
-gradient scrims, layout collision/clipping checks, and < 1 MiB PNG output.
+Builds a 1024x1024 editorial broadsheet front page (`entry.png`) combining
+generated editorial photography with Noto Sans typography, smooth vertical
+gradient scrims, automated overlap/clipping validation, and deterministic
+PNG output under 1 MiB.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Sequence
 
@@ -19,8 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = BASE_DIR / "assets"
 OUTPUT_PATH = BASE_DIR / "entry.png"
 
-CANVAS_W = 1024
-CANVAS_H = 1024
+CANVAS_DIM = 1024
 MAX_BYTES = 1_048_576
 
 NOTO_DIR = Path("/usr/share/fonts/truetype/noto")
@@ -31,64 +30,69 @@ FONT_FILES = {
     "semibold": NOTO_DIR / "NotoSans-SemiBold.ttf",
     "medium": NOTO_DIR / "NotoSans-Medium.ttf",
     "regular": NOTO_DIR / "NotoSans-Regular.ttf",
+    "cond_extrabold": NOTO_DIR / "NotoSans-CondensedExtraBold.ttf",
+    "cond_bold": NOTO_DIR / "NotoSans-CondensedBold.ttf",
 }
 
 COLORS = {
     "bg": (11, 15, 22),
-    "panel_bg": (18, 24, 34),
-    "border": (40, 50, 66),
-    "gold": (222, 182, 62),
+    "card": (18, 24, 34),
+    "border": (42, 52, 68),
+    "gold": (224, 184, 64),
     "masthead": (246, 248, 252),
-    "headline": (255, 255, 255),
+    "white": (255, 255, 255),
     "date": (234, 240, 248),
-    "body": (224, 231, 240),
+    "body": (222, 230, 240),
     "brief": (242, 246, 252),
     "rule": (74, 86, 104),
     "footer": (176, 188, 204),
     "scrim": (7, 10, 16),
 }
 
-# Verified news content — Wednesday 25 November 2026
+# Verified 25 November 2026 world news content
 DATE_LINE = "WEDNESDAY 25 NOVEMBER 2026"
-MASTHEAD_TITLE = "THE WORLD TODAY"
-MASTHEAD_TAGLINE = "THE DAY IN ONE PICTURE"
 
-HERO = {
-    "asset": "hero-samara.jpg",
-    "kicker": "SAMARA · OIL WAR",
-    "headline": "UKRAINE STRIKES SAMARA REFINERIES",
-    "subline": (
-        "Ukrainian drones hit two Rosneft refineries in the Samara region, about "
-        "800 km from the border; fires reported, one person killed and power cuts "
-        "— a day after President Putin vowed retaliation for refinery strikes."
-    ),
-}
+HERO_ASSET = "hero-space.jpg"
+HERO_KICKER = "SPACE · TIANGONG"
+HERO_HEADLINE = "CHINA LAUNCHES SHENZHOU-24"
+HERO_SUBLINE = (
+    "China launched Shenzhou-24 to the Tiangong space station with three "
+    "astronauts, including the first Pakistani astronaut — the first foreign "
+    "astronaut in China's space programme."
+)
 
 LEFT_PANEL = {
     "asset": "panel-chess.jpg",
     "kicker": "GENEVA · WORLD CHESS CHAMPIONSHIP",
     "headline": "GAME 2: 20-MOVE DRAW — MATCH TIED 1–1",
-    "body": (
-        "Champion Gukesh (White) and challenger Sindarov drew Game 2 in just 20 "
-        "moves by threefold repetition; Gukesh surprised with the London System "
-        "(3.Bf4). Score 1–1; Game 3 is Thursday with Sindarov White."
+    "text": (
+        "Champion Gukesh (White) and challenger Sindarov drew Game 2 in just "
+        "20 moves by threefold repetition; Gukesh surprised with the London "
+        "System (3.Bf4). Score 1–1; Game 3 is Thursday with Sindarov White."
     ),
+    "focus_x": 0.50,
+    "focus_y": 0.96,
+    "zoom": 1.00,
 }
 
 RIGHT_PANEL = {
-    "asset": "panel-space.jpg",
-    "kicker": "SPACE · TIANGONG",
-    "headline": "CHINA LAUNCHES SHENZHOU-24 — FIRST FOREIGN ASTRONAUT ABOARD TIANGONG",
-    "body": (
-        "China launched Shenzhou-24 to the Tiangong space station with three "
-        "astronauts, including the first Pakistani astronaut — the first foreign "
-        "astronaut in China's space programme."
+    "asset": "panel-samara.jpg",
+    "kicker": "SAMARA · OIL WAR",
+    "headline": "UKRAINE STRIKES SAMARA REFINERIES",
+    "text": (
+        "Ukrainian drones hit two Rosneft refineries in the Samara region, "
+        "about 800 km from the border; fires reported, one person killed and "
+        "power cuts — a day after President Putin vowed retaliation for "
+        "refinery strikes."
     ),
+    "focus_x": 0.50,
+    "focus_y": 0.54,
+    "zoom": 1.00,
 }
 
 BRIEFS = [
     ("INDONESIA · DISASTER", "BOGOR GOLD MINE FLOOD: 9 DEAD, 17 STILL TRAPPED"),
-    ("UKRAINE · FOREIGN AID", "ZELENSKY: UKRAINE NEEDS €115BN FOREIGN AID FOR 2027"),
+    ("KYIV · WAR FUNDING", "ZELENSKY: UKRAINE NEEDS €115BN FOREIGN AID FOR 2027"),
 ]
 
 FOOTER_TEXT = "NORTH KOREA EXPELS SWISS DIPLOMATS, ORDERS EMBASSY SHUT IN 48 HOURS"
@@ -96,96 +100,95 @@ FOOTER_TEXT = "NORTH KOREA EXPELS SWISS DIPLOMATS, ORDERS EMBASSY SHUT IN 48 HOU
 
 @dataclass(frozen=True)
 class Box:
-    x0: int
-    y0: int
-    x1: int
-    y1: int
+    left: int
+    top: int
+    right: int
+    bottom: int
 
     @property
-    def w(self) -> int:
-        return self.x1 - self.x0
+    def width(self) -> int:
+        return self.right - self.left
 
     @property
-    def h(self) -> int:
-        return self.y1 - self.y0
+    def height(self) -> int:
+        return self.bottom - self.top
 
+    @property
     def coords(self) -> tuple[int, int, int, int]:
-        return (self.x0, self.y0, self.x1, self.y1)
+        return (self.left, self.top, self.right, self.bottom)
 
 
-class PlacementChecker:
-    """Draws text while asserting no clipping beyond bounds and no overlap."""
+class LayoutChecker:
+    """Renders text while validating bounds containment and zero overlaps."""
 
     def __init__(self) -> None:
         self.placed: list[tuple[str, tuple[int, int, int, int]]] = []
         self.errors: list[str] = []
 
-    def text(
+    def draw_line(
         self,
         draw: ImageDraw.ImageDraw,
         label: str,
         x: int,
         y: int,
-        content: str,
+        text: str,
         font: ImageFont.FreeTypeFont,
         fill: tuple[int, int, int],
         bounds: Box,
         right_align: bool = False,
     ) -> tuple[int, int, int, int]:
         if right_align:
-            measured = draw.textbbox((0, y), content, font=font)
-            x = bounds.x1 - measured[2]
-
-        bbox = draw.textbbox((x, y), content, font=font)
-        if bbox[0] < bounds.x0:
-            x += bounds.x0 - bbox[0]
-            bbox = draw.textbbox((x, y), content, font=font)
+            probe = draw.textbbox((0, y), text, font=font)
+            x = bounds.right - probe[2]
+        bbox = draw.textbbox((x, y), text, font=font)
+        if bbox[0] < bounds.left:
+            x += bounds.left - bbox[0]
+            bbox = draw.textbbox((x, y), text, font=font)
 
         clips = []
-        if bbox[0] < bounds.x0:
-            clips.append(f"left {bbox[0]} < {bounds.x0}")
-        if bbox[1] < bounds.y0:
-            clips.append(f"top {bbox[1]} < {bounds.y0}")
-        if bbox[2] > bounds.x1:
-            clips.append(f"right {bbox[2]} > {bounds.x1}")
-        if bbox[3] > bounds.y1:
-            clips.append(f"bottom {bbox[3]} > {bounds.y1}")
+        if bbox[0] < bounds.left:
+            clips.append(f"left({bbox[0]}<{bounds.left})")
+        if bbox[1] < bounds.top:
+            clips.append(f"top({bbox[1]}<{bounds.top})")
+        if bbox[2] > bounds.right:
+            clips.append(f"right({bbox[2]}>{bounds.right})")
+        if bbox[3] > bounds.bottom:
+            clips.append(f"bottom({bbox[3]}>{bounds.bottom})")
         if clips:
-            self.errors.append(f"CLIP [{label}]: {', '.join(clips)} bbox={bbox}")
+            self.errors.append(f"CLIP {label}: {', '.join(clips)} bbox={bbox}")
 
         for other_label, ob in self.placed:
             if bbox[0] < ob[2] and bbox[2] > ob[0] and bbox[1] < ob[3] and bbox[3] > ob[1]:
-                self.errors.append(f"OVERLAP [{label}] vs [{other_label}]: {bbox} vs {ob}")
+                self.errors.append(f"OVERLAP {label} with {other_label}: {bbox} vs {ob}")
 
         self.placed.append((label, bbox))
-        draw.text((x, y), content, font=font, fill=fill)
+        draw.text((x, y), text, font=font, fill=fill)
         return bbox
 
 
-def font_of(weight: str, size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(FONT_FILES[weight]), size)
+def get_font(style: str, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(str(FONT_FILES[style]), size)
 
 
-def cover_crop(
-    img: Image.Image,
+def crop_cover(
+    photo: Image.Image,
     target_w: int,
     target_h: int,
-    fx: float = 0.5,
-    fy: float = 0.5,
+    focus_x: float = 0.5,
+    focus_y: float = 0.5,
     zoom: float = 1.0,
 ) -> Image.Image:
-    """Scale and crop an image to cover target dimensions without distortion."""
-    sw, sh = img.size
-    scale = max(target_w / sw, target_h / sh) * zoom
-    nw = max(target_w, round(sw * scale))
-    nh = max(target_h, round(sh * scale))
-    resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
-    ox = max(0, min(round((nw - target_w) * fx), nw - target_w))
-    oy = max(0, min(round((nh - target_h) * fy), nh - target_h))
-    return resized.crop((ox, oy, ox + target_w, oy + target_h))
+    src_w, src_h = photo.size
+    scale = max(target_w / src_w, target_h / src_h) * zoom
+    new_w = max(target_w, round(src_w * scale))
+    new_h = max(target_h, round(src_h * scale))
+    resized = photo.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    x0 = max(0, min(round((new_w - target_w) * focus_x), new_w - target_w))
+    y0 = max(0, min(round((new_h - target_h) * focus_y), new_h - target_h))
+    return resized.crop((x0, y0, x0 + target_w, y0 + target_h))
 
 
-def make_scrim(
+def make_vertical_scrim(
     width: int,
     height: int,
     fade_start: float,
@@ -193,20 +196,20 @@ def make_scrim(
     max_alpha: int,
     rgb: tuple[int, int, int],
 ) -> Image.Image:
-    """Smoothstep bottom gradient scrim for strong text contrast over photos."""
-    col = Image.new("RGBA", (1, height), (*rgb, 0))
+    col = Image.new("RGBA", (1, height), (rgb[0], rgb[1], rgb[2], 0))
     y_fade = round(height * fade_start)
     y_solid = round(height * solid_start)
     span = max(1, y_solid - y_fade)
     for y in range(height):
         if y < y_fade:
-            a = 0
+            alpha = 0
         elif y < y_solid:
             t = (y - y_fade) / span
-            a = round(max_alpha * (t * t * (3.0 - 2.0 * t)))
+            smooth = t * t * (3.0 - 2.0 * t)
+            alpha = round(max_alpha * smooth)
         else:
-            a = max_alpha
-        col.putpixel((0, y), (*rgb, a))
+            alpha = max_alpha
+        col.putpixel((0, y), (rgb[0], rgb[1], rgb[2], alpha))
     return col.resize((width, height), Image.Resampling.NEAREST)
 
 
@@ -214,20 +217,20 @@ def greedy_wrap(
     draw: ImageDraw.ImageDraw,
     text: str,
     font: ImageFont.FreeTypeFont,
-    max_w: int,
+    max_width: int,
 ) -> list[str]:
     words = text.split()
     lines: list[str] = []
-    cur: list[str] = []
-    for w in words:
-        candidate = " ".join(cur + [w])
-        if cur and draw.textbbox((0, 0), candidate, font=font)[2] > max_w:
-            lines.append(" ".join(cur))
-            cur = [w]
+    buf: list[str] = []
+    for word in words:
+        candidate = " ".join(buf + [word])
+        if buf and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
+            lines.append(" ".join(buf))
+            buf = [word]
         else:
-            cur.append(w)
-    if cur:
-        lines.append(" ".join(cur))
+            buf.append(word)
+    if buf:
+        lines.append(" ".join(buf))
     return lines
 
 
@@ -235,377 +238,348 @@ def balanced_wrap(
     draw: ImageDraw.ImageDraw,
     text: str,
     font: ImageFont.FreeTypeFont,
-    max_w: int,
+    max_width: int,
 ) -> list[str]:
-    """Wrap into minimum lines while evening line lengths and avoiding orphans."""
-    base = greedy_wrap(draw, text, font, max_w)
-    k = len(base)
-    if k <= 1:
+    base = greedy_wrap(draw, text, font, max_width)
+    line_count = len(base)
+    if line_count <= 1:
         return base
 
     words = text.split()
     n = len(words)
-
-    def width_of(i: int, j: int) -> int:
-        return draw.textbbox((0, 0), " ".join(words[i:j]), font=font)[2]
-
     inf = 10**18
-    dp = [[inf] * (n + 1) for _ in range(k + 1)]
-    prev = [[-1] * (n + 1) for _ in range(k + 1)]
+    dp = [[inf] * (n + 1) for _ in range(line_count + 1)]
+    back = [[-1] * (n + 1) for _ in range(line_count + 1)]
     dp[0][0] = 0
 
-    for line_no in range(1, k + 1):
-        for end in range(line_no, n + 1):
-            for start in range(line_no - 1, end):
-                if dp[line_no - 1][start] == inf:
+    for k in range(1, line_count + 1):
+        for end in range(k, n + 1):
+            for start in range(k - 1, end):
+                if dp[k - 1][start] == inf:
                     continue
-                w = width_of(start, end)
-                if w > max_w:
+                width = draw.textbbox((0, 0), " ".join(words[start:end]), font=font)[2]
+                if width > max_width:
                     continue
-                slack = max_w - w
-                orphan = 600_000 if (line_no == k and end - start == 1) else 0
-                cost = dp[line_no - 1][start] + slack * slack + orphan
-                if cost < dp[line_no][end]:
-                    dp[line_no][end] = cost
-                    prev[line_no][end] = start
+                slack = max_width - width
+                orphan = 450_000 if (k == line_count and end - start == 1) else 0
+                cost = dp[k - 1][start] + slack * slack + orphan
+                if cost < dp[k][end]:
+                    dp[k][end] = cost
+                    back[k][end] = start
 
-    if dp[k][n] >= inf:
+    if dp[line_count][n] >= inf:
         return base
 
     out: list[str] = []
     pos = n
-    for line_no in range(k, 0, -1):
-        s = prev[line_no][pos]
-        out.append(" ".join(words[s:pos]))
-        pos = s
+    for k in range(line_count, 0, -1):
+        prev = back[k][pos]
+        out.append(" ".join(words[prev:pos]))
+        pos = prev
     out.reverse()
     return out
 
 
 def paste_photo_panel(
     canvas: Image.Image,
-    asset: str,
+    asset_name: str,
     box: Box,
-    fy: float,
+    focus_x: float,
+    focus_y: float,
+    zoom: float,
     fade_start: float,
     solid_start: float,
     max_alpha: int,
-    zoom: float = 1.0,
-    jpeg_quality: int | None = None,
 ) -> None:
-    photo = Image.open(ASSETS_DIR / asset).convert("RGB")
-    if jpeg_quality is not None:
-        buf = BytesIO()
-        photo.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
-        buf.seek(0)
-        photo = Image.open(buf).convert("RGB")
-    cropped = cover_crop(photo.convert("RGBA"), box.w, box.h, fx=0.5, fy=fy, zoom=zoom)
-    scrim = make_scrim(box.w, box.h, fade_start, solid_start, max_alpha, COLORS["scrim"])
-    canvas.paste(Image.alpha_composite(cropped, scrim), (box.x0, box.y0))
+    photo = Image.open(ASSETS_DIR / asset_name).convert("RGBA")
+    fitted = crop_cover(photo, box.width, box.height, focus_x=focus_x, focus_y=focus_y, zoom=zoom)
+    scrim = make_vertical_scrim(
+        box.width,
+        box.height,
+        fade_start=fade_start,
+        solid_start=solid_start,
+        max_alpha=max_alpha,
+        rgb=COLORS["scrim"],
+    )
+    composited = Image.alpha_composite(fitted, scrim)
+    canvas.paste(composited, (box.left, box.top))
 
 
 def draw_lines(
     draw: ImageDraw.ImageDraw,
-    checker: PlacementChecker,
+    checker: LayoutChecker,
     prefix: str,
     x: int,
-    y: int,
+    y_start: int,
     step: int,
     lines: Sequence[str],
     font: ImageFont.FreeTypeFont,
     fill: tuple[int, int, int],
     bounds: Box,
 ) -> int:
-    cur_y = y
+    y = y_start
     for idx, line in enumerate(lines, start=1):
-        checker.text(draw, f"{prefix}.{idx}", x, cur_y, line, font, fill, bounds)
-        cur_y += step
-    return cur_y
+        checker.draw_line(draw, f"{prefix}.{idx}", x, y, line, font, fill, bounds)
+        y += step
+    return y
 
 
-def render_page(jpeg_quality: int | None = None) -> tuple[Image.Image, list[str]]:
-    canvas = Image.new("RGBA", (CANVAS_W, CANVAS_H), (*COLORS["bg"], 255))
-    checker = PlacementChecker()
+def render_front_page() -> list[str]:
+    canvas = Image.new("RGBA", (CANVAS_DIM, CANVAS_DIM), COLORS["bg"] + (255,))
+    checker = LayoutChecker()
 
     margin = 32
     gutter = 16
-    full_w = CANVAS_W - 2 * margin  # 960
-    half_w = (full_w - gutter) // 2  # 472
+    full_w = CANVAS_DIM - 2 * margin  # 960
+    col_w = (full_w - gutter) // 2  # 472
 
-    hero_box = Box(margin, 122, margin + full_w, 534)  # 960x412
-    left_box = Box(margin, 548, margin + half_w, 840)  # 472x292
-    right_box = Box(margin + half_w + gutter, 548, margin + full_w, 840)  # 472x292
+    hero_box = Box(margin, 122, margin + full_w, 532)  # 960x410
+    left_box = Box(margin, 546, margin + col_w, 846)  # 472x300
+    right_box = Box(margin + col_w + gutter, 546, margin + full_w, 846)  # 472x300
 
     paste_photo_panel(
         canvas,
-        HERO["asset"],
+        HERO_ASSET,
         hero_box,
-        fy=0.22,
-        fade_start=0.52,
-        solid_start=0.71,
+        focus_x=0.50,
+        focus_y=0.28,
+        zoom=1.00,
+        fade_start=0.61,
+        solid_start=0.80,
         max_alpha=240,
-        zoom=1.0,
-        jpeg_quality=jpeg_quality,
     )
     paste_photo_panel(
         canvas,
         LEFT_PANEL["asset"],
         left_box,
-        fy=0.62,
-        fade_start=0.45,
-        solid_start=0.64,
-        max_alpha=242,
-        zoom=1.08,
-        jpeg_quality=jpeg_quality,
+        focus_x=LEFT_PANEL["focus_x"],
+        focus_y=LEFT_PANEL["focus_y"],
+        zoom=LEFT_PANEL["zoom"],
+        fade_start=0.40,
+        solid_start=0.55,
+        max_alpha=248,
     )
     paste_photo_panel(
         canvas,
         RIGHT_PANEL["asset"],
         right_box,
-        fy=0.60,
+        focus_x=RIGHT_PANEL["focus_x"],
+        focus_y=RIGHT_PANEL["focus_y"],
+        zoom=RIGHT_PANEL["zoom"],
         fade_start=0.40,
-        solid_start=0.60,
-        max_alpha=244,
-        zoom=1.02,
-        jpeg_quality=jpeg_quality,
+        solid_start=0.55,
+        max_alpha=248,
     )
 
     draw = ImageDraw.Draw(canvas)
 
-    # Panel borders
-    for box in (hero_box, left_box, right_box):
+    # Panel framing borders
+    for panel_box in (hero_box, left_box, right_box):
         draw.rectangle(
-            [box.x0, box.y0, box.x1 - 1, box.y1 - 1],
+            [panel_box.left, panel_box.top, panel_box.right - 1, panel_box.bottom - 1],
             outline=COLORS["border"],
             width=1,
         )
 
     # Masthead
-    mast_box = Box(margin, 14, margin + full_w, 112)
-    checker.text(
+    masthead_box = Box(margin, 14, margin + full_w, 112)
+    checker.draw_line(
         draw,
         "masthead.title",
         margin,
-        17,
-        MASTHEAD_TITLE,
-        font_of("black", 52),
+        16,
+        "THE WORLD TODAY",
+        get_font("black", 52),
         COLORS["masthead"],
-        mast_box,
+        masthead_box,
     )
-    checker.text(
+    checker.draw_line(
         draw,
         "masthead.tagline",
         margin,
         82,
-        MASTHEAD_TAGLINE,
-        font_of("bold", 17),
+        "THE DAY IN ONE PICTURE",
+        get_font("bold", 17),
         COLORS["gold"],
-        mast_box,
+        masthead_box,
     )
-    checker.text(
+    checker.draw_line(
         draw,
         "masthead.date",
         margin,
         79,
         DATE_LINE,
-        font_of("extrabold", 20),
+        get_font("extrabold", 20),
         COLORS["date"],
-        mast_box,
+        masthead_box,
         right_align=True,
     )
     draw.rectangle([margin, 110, margin + full_w, 113], fill=COLORS["gold"])
 
-    # Hero text block (bottom-anchored inside hero_box)
-    hero_inner = Box(hero_box.x0 + 22, hero_box.y0 + 220, hero_box.x1 - 22, hero_box.y1 - 14)
-    hero_kicker_f = font_of("bold", 16)
-    hero_head_f = font_of("extrabold", 41)
-    hero_sub_f = font_of("regular", 17)
-
-    hero_head_lines = balanced_wrap(draw, HERO["headline"], hero_head_f, hero_inner.w)
-    hero_sub_lines = balanced_wrap(draw, HERO["subline"], hero_sub_f, hero_inner.w)
-
-    head_step = 48
-    sub_step = 24
-    block_h = 24 + len(hero_head_lines) * head_step + 6 + len(hero_sub_lines) * sub_step
-    hero_y = hero_inner.y1 - block_h
-
-    checker.text(
+    # Hero text overlay (positioned low to reveal the rocket exhaust plume above)
+    hero_text_box = Box(hero_box.left + 22, hero_box.top + 266, hero_box.right - 22, hero_box.bottom - 10)
+    hero_kicker_font = get_font("bold", 16)
+    hero_head_font = get_font("extrabold", 42)
+    # Subtle drop shadow behind kicker & headline for crisp readability over rocket glow
+    draw.text((hero_text_box.left + 1, hero_box.top + 273), HERO_KICKER, font=hero_kicker_font, fill=(6, 9, 14))
+    checker.draw_line(
         draw,
         "hero.kicker",
-        hero_inner.x0,
-        hero_y,
-        HERO["kicker"],
-        hero_kicker_f,
+        hero_text_box.left,
+        hero_box.top + 272,
+        HERO_KICKER,
+        hero_kicker_font,
         COLORS["gold"],
-        hero_inner,
+        hero_text_box,
     )
-    y_after_head = draw_lines(
+    draw.text((hero_text_box.left + 2, hero_box.top + 297), HERO_HEADLINE, font=hero_head_font, fill=(6, 9, 14))
+    checker.draw_line(
         draw,
-        checker,
         "hero.headline",
-        hero_inner.x0,
-        hero_y + 24,
-        head_step,
-        hero_head_lines,
-        hero_head_f,
-        COLORS["headline"],
-        hero_inner,
+        hero_text_box.left,
+        hero_box.top + 295,
+        HERO_HEADLINE,
+        hero_head_font,
+        COLORS["white"],
+        hero_text_box,
     )
+    hero_sub_font = get_font("regular", 18)
+    hero_sub_lines = balanced_wrap(draw, HERO_SUBLINE, hero_sub_font, hero_text_box.width)
     draw_lines(
         draw,
         checker,
         "hero.sub",
-        hero_inner.x0,
-        y_after_head + 6,
-        sub_step,
+        hero_text_box.left,
+        hero_box.top + 350,
+        24,
         hero_sub_lines,
-        hero_sub_f,
+        hero_sub_font,
         COLORS["body"],
-        hero_inner,
+        hero_text_box,
     )
 
-    # Side panels (bottom-anchored to handle 1- or 2-line headlines cleanly)
-    panel_kicker_f = font_of("bold", 12)
-    panel_head_f = font_of("extrabold", 18)
-    panel_body_f = font_of("regular", 13)
+    # Secondary side panels
+    panel_kicker_font = get_font("bold", 12)
+    panel_head_font = get_font("cond_extrabold", 22)
+    panel_body_font = get_font("regular", 14)
 
-    for tag, box, data in (
-        ("left", left_box, LEFT_PANEL),
-        ("right", right_box, RIGHT_PANEL),
-    ):
-        inner = Box(box.x0 + 16, box.y0 + 112, box.x1 - 16, box.y1 - 12)
-        h_lines = balanced_wrap(draw, data["headline"], panel_head_f, inner.w)
-        b_lines = balanced_wrap(draw, data["body"], panel_body_f, inner.w)
-        h_step = 23
-        b_step = 18
-        total_h = 18 + len(h_lines) * h_step + 7 + len(b_lines) * b_step
-        start_y = inner.y1 - total_h
-
-        checker.text(
+    for tag, box, spec in (("left", left_box, LEFT_PANEL), ("right", right_box, RIGHT_PANEL)):
+        inner = Box(box.left + 16, box.top + 148, box.right - 16, box.bottom - 10)
+        draw.text((inner.left + 1, box.top + 155), spec["kicker"], font=panel_kicker_font, fill=(6, 9, 14))
+        checker.draw_line(
             draw,
             f"{tag}.kicker",
-            inner.x0,
-            start_y,
-            data["kicker"],
-            panel_kicker_f,
+            inner.left,
+            box.top + 154,
+            spec["kicker"],
+            panel_kicker_font,
             COLORS["gold"],
             inner,
         )
-        y_body = draw_lines(
+        head_lines = balanced_wrap(draw, spec["headline"], panel_head_font, inner.width)
+        next_y = draw_lines(
             draw,
             checker,
             f"{tag}.headline",
-            inner.x0,
-            start_y + 18,
-            h_step,
-            h_lines,
-            panel_head_f,
-            COLORS["headline"],
+            inner.left,
+            box.top + 173,
+            26,
+            head_lines,
+            panel_head_font,
+            COLORS["white"],
             inner,
         )
+        body_lines = balanced_wrap(draw, spec["text"], panel_body_font, inner.width)
         draw_lines(
             draw,
             checker,
             f"{tag}.body",
-            inner.x0,
-            y_body + 7,
-            b_step,
-            b_lines,
-            panel_body_f,
+            inner.left,
+            next_y + 5,
+            20,
+            body_lines,
+            panel_body_font,
             COLORS["body"],
             inner,
         )
 
     # Briefs strip
-    brief_top = 854
-    brief_bottom = 954
-    brief_kicker_f = font_of("bold", 13)
-    brief_text_f = font_of("bold", 18)
+    brief_top = 860
+    brief_bottom = 958
+    brief_kicker_font = get_font("bold", 12)
+    brief_text_font = get_font("bold", 18)
 
-    for idx, (kicker, headline) in enumerate(BRIEFS):
-        bx0 = margin + idx * (half_w + gutter)
-        bx1 = bx0 + half_w
+    for idx, (kicker, line_text) in enumerate(BRIEFS):
+        bx0 = margin + idx * (col_w + gutter)
+        bx1 = bx0 + col_w
         card = Box(bx0, brief_top, bx1, brief_bottom)
-        draw.rectangle(card.coords(), fill=COLORS["panel_bg"], outline=COLORS["border"], width=1)
+        draw.rectangle(card.coords, fill=COLORS["card"], outline=COLORS["border"], width=1)
         draw.rectangle([bx0, brief_top, bx1, brief_top + 3], fill=COLORS["gold"])
 
         inner = Box(bx0 + 16, brief_top + 10, bx1 - 16, brief_bottom - 10)
-        checker.text(
+        checker.draw_line(
             draw,
             f"brief{idx + 1}.kicker",
-            inner.x0,
-            brief_top + 13,
+            inner.left,
+            brief_top + 14,
             kicker,
-            brief_kicker_f,
+            brief_kicker_font,
             COLORS["gold"],
             inner,
         )
-        wrapped = balanced_wrap(draw, headline, brief_text_f, inner.w)
+        wrapped = balanced_wrap(draw, line_text, brief_text_font, inner.width)
         draw_lines(
             draw,
             checker,
             f"brief{idx + 1}.text",
-            inner.x0,
-            brief_top + 38,
+            inner.left,
+            brief_top + 36,
             24,
             wrapped,
-            brief_text_f,
+            brief_text_font,
             COLORS["brief"],
             inner,
         )
 
-    # Footer line
-    draw.rectangle([margin, 968, margin + full_w, 969], fill=COLORS["rule"])
-    footer_box = Box(margin, 972, margin + full_w, 1012)
-    checker.text(
+    # Footer strip
+    draw.rectangle([margin, 970, margin + full_w, 971], fill=COLORS["rule"])
+    footer_box = Box(margin, 974, margin + full_w, 1012)
+    checker.draw_line(
         draw,
         "footer.line",
         margin,
-        981,
+        983,
         FOOTER_TEXT,
-        font_of("medium", 13),
+        get_font("medium", 13),
         COLORS["footer"],
         footer_box,
     )
 
-    return canvas.convert("RGB"), checker.errors
-
-
-def compose() -> list[str]:
-    rgb, errors = render_page(jpeg_quality=None)
+    # Deterministic PNG export under 1 MiB
+    rgb = canvas.convert("RGB")
     rgb.save(OUTPUT_PATH, format="PNG", optimize=True)
-    size = OUTPUT_PATH.stat().st_size
-    print(f"Initial RGB PNG size: {size} bytes")
-
-    if size > MAX_BYTES:
-        for q in (82, 72, 62, 52):
-            rgb, errors = render_page(jpeg_quality=q)
-            rgb.save(OUTPUT_PATH, format="PNG", optimize=True)
-            size = OUTPUT_PATH.stat().st_size
-            print(f"Recompressed assets (JPEG q={q}) -> RGB PNG size: {size} bytes")
-            if size <= MAX_BYTES:
-                break
-
-    if size > MAX_BYTES:
+    byte_size = OUTPUT_PATH.stat().st_size
+    print(f"Rendered RGB PNG: {byte_size} bytes ({rgb.size[0]}x{rgb.size[1]})")
+    if byte_size > MAX_BYTES:
         quantized = rgb.quantize(
             colors=256,
             method=Image.Quantize.MEDIANCUT,
             dither=Image.Dither.FLOYDSTEINBERG,
         )
         quantized.save(OUTPUT_PATH, format="PNG", optimize=True)
-        size = OUTPUT_PATH.stat().st_size
-        print(f"Quantized 256-color PNG size: {size} bytes")
+        byte_size = OUTPUT_PATH.stat().st_size
+        print(f"Quantized PNG: {byte_size} bytes")
 
-    return errors
+    return checker.errors
 
 
 def main() -> int:
-    errors = compose()
+    errors = render_front_page()
     if errors:
         for err in errors:
             print(f"LAYOUT ERROR: {err}")
         return 1
-    print("Layout check passed: 0 errors.")
+    print("Layout validation passed (0 issues).")
     return 0
 
 
